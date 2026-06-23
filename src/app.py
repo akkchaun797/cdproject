@@ -81,11 +81,13 @@ if st.button("▶ Run Validation", type="primary"):
             st.subheader("📸 Social Media Image Validation Report")
             img_results = []
             for img in image_files:
-                res = validate_image_resolution(img)
+                res = validate_image_resolution(img, excel_df)
                 img_results.append({
                     "file":             img.name,
                     "resolution":       res["resolution"],
-                    "resolution_check": res["check"]
+                    "resolution_check": res["resolution_check"],
+                    "merchant_check":   res["merchant_check"],
+                    "date_check":       res["date_check"]
                 })
             st.dataframe(pd.DataFrame(img_results), use_container_width=True)
 

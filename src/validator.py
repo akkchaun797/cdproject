@@ -64,12 +64,40 @@ def validate_pdf_vs_excel(pdf_offers: list, excel_df: pd.DataFrame) -> list:
     return results
 
 
-def validate_image_resolution(image) -> dict:
+def validate_image_resolution(image, excel_df=None) -> dict:
+    import pytesseract
     from PIL import Image
+
+    pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
     img = Image.open(image)
     width, height = img.size
+    image.seek(0)
+
     min_size = 1080
+    resolution_check = "✅ Pass" if width >= min_size and height >= min_size else f"❌ Fail (minimum {min_size}x{min_size})"
+
+    extracted_text = pytesseract.image_to_string(img).lower()
+
+    merchant_check = "⚠️ N/A"
+    date_check = "⚠️ N/A"
+
+    if excel_df is not None:
+        merchant_check = "❌ Not found"
+        for _, row in excel_df.iterrows():
+            if row["offer_merchant_name"] in extracted_text:
+                merchant_check = f"✅ Found: {row['offer_merchant_name'].title()}"
+                break
+
+        date_check = "❌ Not found"
+        for _, row in excel_df.iterrows():
+            if row["offer_valid_to"] in extracted_text:
+                date_check = f"✅ Found: {row['offer_valid_to']}"
+                break
+
     return {
         "resolution": f"{width}x{height}",
-        "check": "✅ Pass" if width >= min_size and height >= min_size else f"❌ Fail (minimum {min_size}x{min_size})"
+        "resolution_check": resolution_check,
+        "merchant_check": merchant_check,
+        "date_check": date_check
     }
