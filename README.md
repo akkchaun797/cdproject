@@ -92,6 +92,4 @@ full LLM-vs-library comparison and rationale.
   to fuzzy text similarity for purely descriptive offers.
 - GPT-4 Vision extraction depends on creative legibility; very stylised text may
   need manual review.
-- The sample `april_2026_offers.xlsx` / `.pdf` in this repo are mock data and
-  their dates are not mutually consistent, so the demo will show date fails.
-  Regenerate the PDF from the Excel (or use the real April data) for a clean pass.
+

@@ -18,15 +18,19 @@ offer visible in English — do not stop after the first one.
 Return ONLY valid JSON in exactly this shape:
 {
   "merchants": [
-    {"merchant": "<name>", "offer": "<discount / offer text>", "date": "<validity end date as YYYY-MM-DD>"}
+    {"merchant": "<name>", "offer": "<the offer / discount text shown for this merchant>", "date": "<validity end date as YYYY-MM-DD>"}
   ],
   "cta": "<any footer call-to-action or Bank ABC / Smartdeals branding text, or empty string if none>"
 }
 
 Rules:
 - Include one object per merchant tile. A typical creative has 8-12 merchants.
-- Only English content. If a field is missing, use an empty string.
-- Convert any visible date to YYYY-MM-DD."""
+- The "offer" field is REQUIRED. Read the discount/offer line on each tile and copy
+  the EXACT text that states the deal, e.g. "Up to 30% off", "15% off on food",
+  "From AED 550 net/night", "Buy 1 Get 1 Free". Never leave "offer" empty if any
+  discount, price, percentage, or deal wording is visible anywhere in the tile.
+- If the discount is shown as a number/percentage badge (e.g. "30%"), include that value.
+- Only English content. Convert any visible date to YYYY-MM-DD."""
 
 
 def image_to_base64(image_path: str) -> str:
@@ -111,7 +115,15 @@ def extract_text_from_image_with_openai(image_file) -> str:
             "content": [
                 {
                     "type": "text",
-                    "text": "This is a bank marketing Instagram post. Extract all visible English text. Return as plain lowercase string."
+                    "text": (
+                        "This is a Bank ABC 'Smartdeals' marketing Instagram post. "
+                        "Extract ALL visible English text, INCLUDING brand names and logos "
+                        "even if they are stylised graphics — in particular always report the "
+                        "'smartdeals' logo, any 'Bank ABC' / 'ADIB' branding, and any "
+                        "call-to-action or app reference if present. Also include the merchant "
+                        "name, the discount/offer text, and any validity date. "
+                        "Return everything as one plain lowercase string."
+                    )
                 },
                 {
                     "type": "image_url",

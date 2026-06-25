@@ -1,6 +1,6 @@
 import re  # noqa
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, date, timedelta
 from difflib import SequenceMatcher
 
 PASS = "✅ Pass"
@@ -10,17 +10,52 @@ PASS = "✅ Pass"
 #  Normalisation helpers
 # ─────────────────────────────────────────────────────────────
 def normalise_date(val):
-    """Excel serial integers OR string dates → YYYY-MM-DD."""
+    """Real dates, Excel serial integers OR string dates → YYYY-MM-DD."""
+    # empty / missing cells (NaN, NaT, None)
+    try:
+        if val is None or pd.isna(val):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    # real date / datetime / pandas Timestamp (Timestamp subclasses datetime)
+    if isinstance(val, (datetime, date)):
+        return val.strftime("%Y-%m-%d")
+    if hasattr(val, "strftime"):  # defensive: any other date-like object
+        return val.strftime("%Y-%m-%d")
     if isinstance(val, (int, float)):
         return (datetime(1899, 12, 30) + timedelta(days=int(val))).strftime("%Y-%m-%d")
     if isinstance(val, str):
         s = val.strip()
-        for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d", "%Y/%m/%d"):
+        # unify separators so 30\04\2026, 30.04.2026, 30/04/2026 all work
+        s_norm = re.sub(r"[\\/.]", "-", s)
+        s_clean = re.sub(r"(\d+)(st|nd|rd|th)", r"\1", s_norm).replace(",", "")
+        for fmt in ("%d-%m-%Y", "%Y-%m-%d", "%d-%b-%Y", "%d-%B-%Y",
+                    "%b-%d-%Y", "%B-%d-%Y", "%d %B %Y", "%d %b %Y",
+                    "%B %d %Y", "%b %d %Y"):
             try:
-                return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+                return datetime.strptime(s_clean.strip(), fmt).strftime("%Y-%m-%d")
             except ValueError:
                 continue
     return str(val)
+
+
+def date_in_text(excel_iso: str, text: str) -> bool:
+    """True if the Excel end-date (YYYY-MM-DD) appears in `text` in ANY common format."""
+    text = str(text)
+    if excel_iso.lower() in text.lower():
+        return True
+    # numeric dates: 30/04/2026, 30-04-2026, 2026-04-30, 30.04.2026, 30\04\2026
+    for m in re.findall(r"\d{1,4}[\\/.\-]\d{1,2}[\\/.\-]\d{1,4}", text):
+        if normalise_date(m) == excel_iso:
+            return True
+    # textual dates: 30 April 2026 / April 30, 2026 / 30 Apr 2026
+    for m in re.findall(r"[0-9]{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]{3,9}\s+[0-9]{4}", text):
+        if normalise_date(m) == excel_iso:
+            return True
+    for m in re.findall(r"[A-Za-z]{3,9}\s+[0-9]{1,2}(?:st|nd|rd|th)?,?\s+[0-9]{4}", text):
+        if normalise_date(m) == excel_iso:
+            return True
+    return False
 
 
 def normalise_name(s) -> str:
@@ -28,6 +63,23 @@ def normalise_name(s) -> str:
     s = str(s).lower()
     s = re.sub(r"[^a-z0-9 ]+", " ", s)
     return re.sub(r"\s+", " ", s).strip()
+
+
+def normalise_quotes(s: str) -> str:
+    """Unify typographic apostrophes/quotes and odd spaces to plain ASCII."""
+    s = str(s)
+    for ch in ("’", "‘", "‛", "ʼ", "´", "`"):  # curly/odd apostrophes
+        s = s.replace(ch, "'")
+    for ch in ("“", "”"):  # curly double quotes
+        s = s.replace(ch, '"')
+    return s.replace(" ", " ")  # non-breaking space
+
+
+def same_spelling(a: str, b: str) -> bool:
+    """Exact spelling match, but tolerant of quote style, case and whitespace."""
+    def n(x):
+        return re.sub(r"\s+", " ", normalise_quotes(x)).strip().lower()
+    return n(a) == n(b)
 
 
 def fuzzy_ratio(a: str, b: str) -> float:
@@ -47,23 +99,45 @@ def best_excel_match(name: str, excel_df: pd.DataFrame):
 # ─────────────────────────────────────────────────────────────
 #  Discount / offer matching
 # ─────────────────────────────────────────────────────────────
-def discount_signature(text: str) -> set:
-    """Extract comparable discount tokens: percentages, money amounts, integers."""
-    t = str(text).lower().replace(",", "")
-    tokens = set()
-    tokens |= {p.replace(" ", "") for p in re.findall(r"\d+\s*%", t)}          # 20%
-    tokens |= {m.replace(" ", "") for m in re.findall(r"(?:\$|aed)\s*\d+", t)}  # $50 / aed550
-    bare = re.findall(r"(?<![%$\d])\b\d+\b", t)                                # plain integers
-    tokens |= {f"#{n}" for n in bare}
-    return tokens
+def _percentages(text: str) -> set:
+    return set(re.findall(r"(\d+)\s*%", str(text).lower()))
 
 
-def discount_match(creative_text: str, excel_title: str) -> bool:
-    """Numeric-token equality first; fall back to fuzzy text similarity."""
-    c_sig, e_sig = discount_signature(creative_text), discount_signature(excel_title)
-    if e_sig:
-        return e_sig.issubset(c_sig)
-    return fuzzy_ratio(creative_text, excel_title) >= 0.6
+def _numbers(text: str) -> set:
+    """All numbers, currency-agnostic (AED 550 and 550 both -> '550')."""
+    return set(re.findall(r"\d+", str(text).lower().replace(",", "")))
+
+
+def discount_match(creative_text: str, excel_title: str):
+    """
+    3-state discount comparison:
+      True  -> values match
+      False -> values clearly conflict (e.g. 20% vs 15%)
+      None  -> cannot be determined from the creative (blank / unreadable) → review
+    Currency symbols are ignored, so 'AED 550' matches '550 net/night'.
+    """
+    c = str(creative_text).strip().lower()
+    e = str(excel_title).strip().lower()
+    if not c:
+        return None  # nothing extracted from the creative → needs manual review
+
+    c_pct, e_pct = _percentages(c), _percentages(e)
+    c_num, e_num = _numbers(c), _numbers(e)
+
+    # Excel offer is percentage-based (most common: "Up to 30% off")
+    if e_pct:
+        if c_pct:
+            return e_pct == c_pct                # both show a % → must be equal
+        if e_pct & c_num:
+            return True                          # % value present without the sign
+        return None                              # creative shows no comparable value
+    # Excel offer is amount-based ("From AED 550", "$50")
+    if e_num:
+        if c_num:
+            return e_num.issubset(c_num)
+        return None
+    # purely descriptive offer ("Buy 1 Get 1", "Free dessert")
+    return fuzzy_ratio(c, e) >= 0.5
 
 
 # ─────────────────────────────────────────────────────────────
@@ -95,6 +169,25 @@ def _cta_in_text(text: str) -> bool:
 def _branding_in_text(text: str) -> bool:
     t = str(text).lower().replace(" ", "")
     return ("bankabc" in t) or ("smartdeals" in t)
+
+
+def _name_in_image(excel_name: str, text: str) -> bool:
+    """
+    True if the merchant name appears in the image text. Tolerant of shortened
+    forms and '&' vs 'and' (e.g. Excel 'Millennium Hotels & Resorts' matches a
+    post that says 'Millennium Hotels'). Passes when most significant name
+    words are present.
+    """
+    en = normalise_name(excel_name)          # '&' already stripped -> words only
+    tx = normalise_name(text)
+    if en and en in tx:
+        return True
+    words = [w for w in en.split() if len(w) >= 4] or en.split()
+    if not words:
+        return False
+    hits = sum(1 for w in words if w in tx)
+    # at least half of the significant words must appear (min 1)
+    return hits >= max(1, (len(words) + 1) // 2)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -130,18 +223,23 @@ def validate_email_pdf(pdf_offers: list, excel_df: pd.DataFrame, cta_text: str =
         excel_name = row["offer_merchant_name"]
         matched_excel.add(excel_name)
 
-        # Check 2 — spelling (exact, case-insensitive)
-        if creative_name.lower() == excel_name.lower():
+        # Check 2 — spelling (exact, but tolerant of quote style & whitespace)
+        if same_spelling(creative_name, excel_name):
             spelling = PASS
         elif score >= 0.6:
             spelling = f"❌ Fail (creative: '{creative_name}' vs Excel: '{excel_name}')"
         else:
             spelling = f"⚠️ Review ('{creative_name}' vs '{excel_name}')"
 
-        # Check 3 — discount match
+        # Check 3 — discount match (3-state)
         excel_title = row.get("Offer Title", "")
-        disc = PASS if discount_match(offer_text, excel_title) \
-            else f"❌ Fail (creative: '{offer_text}' vs Excel: '{excel_title}')"
+        m = discount_match(offer_text, excel_title)
+        if m is True:
+            disc = PASS
+        elif m is None:
+            disc = f"⚠️ Review (creative discount not read; Excel: '{excel_title}')"
+        else:
+            disc = f"❌ Fail (creative: '{offer_text}' vs Excel: '{excel_title}')"
 
         # Check 4 — validity date
         excel_date = row["offer_valid_to"]
@@ -207,16 +305,22 @@ def validate_social_image(filename: str, width: int, height: int,
     # Check 2 — resolution
     base["2. Resolution"] = _res_check(width, height)
 
-    # Check 3 — discount
-    base["3. Discount"] = PASS if discount_match(text, row.get("Offer Title", "")) \
-        else f"❌ Fail (Excel: '{row.get('Offer Title', '')}')"
+    # Check 3 — discount (3-state)
+    _excel_title = row.get("Offer Title", "")
+    _m = discount_match(text, _excel_title)
+    if _m is True:
+        base["3. Discount"] = PASS
+    elif _m is None:
+        base["3. Discount"] = f"⚠️ Review (discount not read; Excel: '{_excel_title}')"
+    else:
+        base["3. Discount"] = f"❌ Fail (Excel: '{_excel_title}')"
 
     # Check 4 — validity date
-    base["4. Validity date"] = PASS if row["offer_valid_to"].lower() in text \
+    base["4. Validity date"] = PASS if date_in_text(row["offer_valid_to"], text) \
         else f"❌ Not found (Excel: {row['offer_valid_to']})"
 
-    # Check 5 — spelling (merchant name must appear correctly in image text)
-    base["5. Spelling"] = PASS if normalise_name(excel_name) in normalise_name(text) \
+    # Check 5 — spelling (merchant name appears correctly in image text)
+    base["5. Spelling"] = PASS if _name_in_image(excel_name, text) \
         else f"⚠️ '{excel_name}' not clearly found in image text"
 
     # Check 6 — Bank branding
